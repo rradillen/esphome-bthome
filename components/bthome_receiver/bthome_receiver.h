@@ -199,8 +199,9 @@ class BTHomeDevice : public Parented<BTHomeReceiverHub> {
 
  protected:
   // Decrypt encrypted payload using AES-128-CCM
-  bool decrypt_payload_(const uint8_t *ciphertext, size_t ciphertext_len, const uint8_t *mac,
-                        uint8_t device_info, uint32_t counter, uint8_t *plaintext, size_t *plaintext_len);
+  bool decrypt_payload_(const uint8_t *ciphertext, size_t ciphertext_len, const uint8_t *mic,
+                        const uint8_t *mac, uint8_t device_info, uint32_t counter,
+                        uint8_t *plaintext, size_t *plaintext_len);
 
   // Parse measurement objects from payload
   void parse_measurements_(const uint8_t *data, size_t len);
