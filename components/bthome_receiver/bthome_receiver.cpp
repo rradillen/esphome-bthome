@@ -719,10 +719,10 @@ bool BTHomeDevice::parse_advertisement(const std::vector<uint8_t> &service_data)
     const uint8_t *ciphertext = service_data.data() + 1;
     size_t ciphertext_len = service_data.size() - 1 - 4;  // Exclude device_info and counter+MIC
 
-    // Get MAC address (6 bytes)
+    // Get MAC address (6 bytes) - big-endian (display order) per BTHome v2 spec
     uint8_t mac[6];
     for (int i = 0; i < 6; i++) {
-      mac[i] = (this->address_ >> (i * 8)) & 0xFF;
+      mac[i] = (this->address_ >> ((5 - i) * 8)) & 0xFF;
     }
 
     size_t plaintext_len;
