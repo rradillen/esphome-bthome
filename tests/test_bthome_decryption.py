@@ -158,3 +158,104 @@ class TestEndToEnd:
         """End-to-end test confirming reversed MAC causes decryption failure."""
         with pytest.raises(ValueError, match="MAC check failed"):
             process_service_data(KEY, MAC[::-1], SERVICE_DATA)
+
+
+def _decrypt_like_cpp_receiver(service_data: bytes, key: bytes, mac_display: bytes) -> bytes:
+    """Replicate decrypt_payload_ pointer arithmetic from bthome_receiver.cpp.
+
+    This mirrors the C++ code:
+        ciphertext     = service_data.data() + 1
+        ciphertext_len = service_data.size() - 1 - 4    // S-5
+        actual_ct_len  = ciphertext_len - 4              // S-9
+        mic            = ciphertext + actual_ct_len      // BUG: points to counter, not MIC!
+
+    After the fix, mic should come from service_data[S-4:] (last 4 bytes).
+    """
+    device_info = service_data[0:1]
+
+    # --- mirror C++ decrypt_payload_ pointer arithmetic ---
+    ciphertext_start = 1
+    ciphertext_len = len(service_data) - 1 - 4                  # S-5
+    actual_ciphertext_len = ciphertext_len - 4                   # S-9
+
+    ciphertext = service_data[ciphertext_start:ciphertext_start + actual_ciphertext_len]
+
+    # BUG: mic = ciphertext + actual_ciphertext_len → service_data[S-8] = counter
+    mic = service_data[ciphertext_start + actual_ciphertext_len:
+                       ciphertext_start + actual_ciphertext_len + 4]
+
+    counter_offset = len(service_data) - 8
+    counter_le = service_data[counter_offset:counter_offset + 4]
+
+    nonce = mac_display + UUID + device_info + counter_le
+    cipher = AES.new(key, AES.MODE_CCM, nonce=nonce, mac_len=4)
+    return cipher.decrypt_and_verify(ciphertext, mic)
+
+
+class TestMicPointer:
+    """Regression tests for the receiver MIC pointer bug.
+
+    The buggy C++ code computes:
+        ciphertext     = service_data + 1
+        ciphertext_len = service_data.size() - 1 - 4   // S-5
+        actual_ct_len  = ciphertext_len - 4             // S-9  (correct)
+        mic            = ciphertext + actual_ct_len     // service_data[S-8] = COUNTER! (BUG)
+
+    The MIC actually lives at service_data[S-4] (the last 4 bytes).
+    """
+
+    def test_service_data_layout(self):
+        """Assert the spec service_data layout: [device_info][ciphertext][counter][MIC]."""
+        assert SERVICE_DATA[0:1] == DEV_INFO
+        assert SERVICE_DATA[1:1 + len(CIPHERTEXT)] == CIPHERTEXT
+        assert SERVICE_DATA[-8:-4] == COUNTER
+        assert SERVICE_DATA[-4:] == MIC
+
+    def test_cpp_receiver_decrypts_correctly(self):
+        """The C++ receiver logic should decrypt spec vectors to expected plaintext.
+
+        This test FAILS when _decrypt_like_cpp_receiver mirrors the buggy code
+        (MIC read from counter position). It PASSES once the MIC pointer is fixed
+        to read from service_data[-4:].
+        """
+        result = _decrypt_like_cpp_receiver(SERVICE_DATA, KEY, MAC)
+        assert result == PLAINTEXT
+
+    def test_mic_from_counter_position_fails(self):
+        """MIC read from counter bytes — the receiver MIC pointer bug.
+
+        Simulates the buggy C++ code where mic = ciphertext + actual_ciphertext_len
+        points to service_data[S-8] (counter start) instead of service_data[S-4] (MIC).
+        """
+        ciphertext_len = len(SERVICE_DATA) - 1 - 4
+        actual_ct_len = ciphertext_len - 4
+        mic_buggy = SERVICE_DATA[1 + actual_ct_len : 1 + actual_ct_len + 4]
+
+        # The buggy pointer reads counter bytes, not MIC
+        assert mic_buggy == COUNTER, "Buggy pointer should land on counter"
+        assert mic_buggy != MIC, "Buggy pointer must NOT be the real MIC"
+
+        # Decryption with wrong MIC must fail
+        nonce = MAC + UUID + DEV_INFO + COUNTER
+        cipher = AES.new(KEY, AES.MODE_CCM, nonce=nonce, mac_len=4)
+        with pytest.raises(ValueError, match="MAC check failed"):
+            cipher.decrypt_and_verify(CIPHERTEXT, mic_buggy)
+
+    def test_mic_from_correct_position_succeeds(self):
+        """MIC read from last 4 bytes of service_data — the fixed code.
+
+        Fixed C++ code:
+            actual_ciphertext_len = service_data.size() - 9
+            mic = service_data.data() + service_data.size() - 4
+        """
+        actual_ct_len = len(SERVICE_DATA) - 9
+        ciphertext = SERVICE_DATA[1:1 + actual_ct_len]
+        mic_fixed = SERVICE_DATA[-4:]
+
+        assert mic_fixed == MIC
+        assert ciphertext == CIPHERTEXT
+
+        nonce = MAC + UUID + DEV_INFO + COUNTER
+        cipher = AES.new(KEY, AES.MODE_CCM, nonce=nonce, mac_len=4)
+        plaintext = cipher.decrypt_and_verify(ciphertext, mic_fixed)
+        assert plaintext == PLAINTEXT
