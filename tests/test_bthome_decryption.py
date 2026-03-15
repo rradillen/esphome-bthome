@@ -163,26 +163,21 @@ class TestEndToEnd:
 def _decrypt_like_cpp_receiver(service_data: bytes, key: bytes, mac_display: bytes) -> bytes:
     """Replicate decrypt_payload_ pointer arithmetic from bthome_receiver.cpp.
 
-    This mirrors the C++ code:
-        ciphertext     = service_data.data() + 1
-        ciphertext_len = service_data.size() - 1 - 4    // S-5
-        actual_ct_len  = ciphertext_len - 4              // S-9
-        mic            = ciphertext + actual_ct_len      // BUG: points to counter, not MIC!
-
-    After the fix, mic should come from service_data[S-4:] (last 4 bytes).
+    Fixed C++ code:
+        ciphertext             = service_data.data() + 1
+        actual_ciphertext_len  = service_data.size() - 9   // device_info(1) + counter(4) + MIC(4)
+        mic                    = service_data.data() + service_data.size() - 4  // last 4 bytes
     """
     device_info = service_data[0:1]
 
-    # --- mirror C++ decrypt_payload_ pointer arithmetic ---
+    # --- mirror fixed C++ decrypt_payload_ pointer arithmetic ---
     ciphertext_start = 1
-    ciphertext_len = len(service_data) - 1 - 4                  # S-5
-    actual_ciphertext_len = ciphertext_len - 4                   # S-9
+    actual_ciphertext_len = len(service_data) - 9            # S-9: exclude device_info, counter, MIC
 
     ciphertext = service_data[ciphertext_start:ciphertext_start + actual_ciphertext_len]
 
-    # BUG: mic = ciphertext + actual_ciphertext_len → service_data[S-8] = counter
-    mic = service_data[ciphertext_start + actual_ciphertext_len:
-                       ciphertext_start + actual_ciphertext_len + 4]
+    # FIXED: mic from last 4 bytes of service_data
+    mic = service_data[len(service_data) - 4:]
 
     counter_offset = len(service_data) - 8
     counter_le = service_data[counter_offset:counter_offset + 4]
